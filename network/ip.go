@@ -2,10 +2,20 @@ package network
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 )
 
-var PRIVATE_IP_SUBNET = [...]string{
+type Addr struct {
+	IP   net.IP
+	Port int
+}
+
+func (addr Addr) String() string {
+	return fmt.Sprintf("%s:%d", addr.IP, addr.Port)
+}
+
+var PRIVATE_IPV4 = [3]string{
 	"10.0.0.0/8",
 	"172.16.0.0/12",
 	"192.168.0.0/16",
