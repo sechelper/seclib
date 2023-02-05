@@ -2,8 +2,10 @@ package network_test
 
 import (
 	"fmt"
+	"github.com/miekg/dns"
 	"github.com/sechelper/seclib/network"
 	"log"
+	"net"
 )
 
 func ExampleParseCIDR() {
@@ -15,4 +17,48 @@ func ExampleParseCIDR() {
 	for i := range ipv4NetSegment {
 		fmt.Println(ipv4NetSegment[i])
 	}
+}
+
+func ExampleAddr_String() {
+	addr := network.Addr{
+		IP:   net.ParseIP("114.114.114.114"),
+		Port: 53,
+	}
+
+	fmt.Println(addr)
+}
+
+func ExampleDns_Exchange() {
+	var ips []net.IP = nil
+	in, _, err := network.DefaultResolver.Exchange(dns.TypeA, "go-hacker-code.lab.secself.com")
+
+	if err != nil || in.Answer == nil {
+		log.Fatal(err)
+	}
+
+	ips = make([]net.IP, 0)
+	for i := range in.Answer {
+		if rr, ok := in.Answer[i].(*dns.A); ok {
+			ips = append(ips, rr.A)
+		}
+	}
+	fmt.Println(ips)
+}
+
+func ExampleDns_LookupIP() {
+	ip, err := network.DefaultResolver.LookupIP("go-hacker-code.lab.secself.com")
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	fmt.Println(ip)
+}
+
+func ExampleDns_LookupCNAME() {
+	cname, err := network.DefaultResolver.LookupCNAME("go-hacker-code.lab.secself.com")
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	fmt.Println(cname)
 }
