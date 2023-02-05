@@ -11,7 +11,7 @@ type Msg dns.Msg
 
 type Dns struct {
 	Ns      string
-	Msg     *Msg
+	NewMsg  func() *Msg
 	Timeout time.Duration
 }
 
@@ -24,7 +24,7 @@ func NewDefaultMsg() *Msg {
 }
 
 var DefaultResolver = &Dns{
-	Msg:     NewDefaultMsg(),
+	NewMsg:  NewDefaultMsg,
 	Ns:      "223.6.6.6:53",
 	Timeout: 3 * time.Second,
 }
@@ -33,18 +33,18 @@ func (_dns *Dns) Exchange(dnsType uint16, domain string) (r *dns.Msg, rtt time.D
 	if !strings.HasSuffix(domain, ".") {
 		domain += "."
 	}
-	_dns.Msg.Question = make([]dns.Question, 1)
-	_dns.Msg.Question[0] = dns.Question{Name: domain,
+	msg := _dns.NewMsg()
+	msg.Question = make([]dns.Question, 1)
+	msg.Question[0] = dns.Question{Name: domain,
 		Qtype: dnsType, Qclass: dns.ClassINET}
 	c := new(dns.Client)
 	c.Timeout = _dns.Timeout
-	return c.Exchange((*dns.Msg)(_dns.Msg), _dns.Ns)
+	return c.Exchange((*dns.Msg)(msg), _dns.Ns)
 }
 
 // LookupIP looks up host using the local resolver.
 // It returns a slice of that host's IPv4 and IPv6 addresses.
-func (_dns *Dns) LookupIP(host string) ([]net.IP, error) {
-	var ips []net.IP = nil
+func (_dns *Dns) LookupIP(host string) (ips []net.IP, err error) {
 	in, _, err := DefaultResolver.Exchange(dns.TypeA, host)
 
 	if err != nil || in.Answer == nil {

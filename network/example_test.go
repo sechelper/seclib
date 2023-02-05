@@ -48,7 +48,7 @@ func ExampleDns_Exchange() {
 func ExampleDns_LookupIP() {
 	ip, err := network.DefaultResolver.LookupIP("go-hacker-code.lab.secself.com")
 	if err != nil {
-		fmt.Println(err)
+		log.Fatal(err)
 	}
 
 	fmt.Println(ip)
@@ -57,7 +57,7 @@ func ExampleDns_LookupIP() {
 func ExampleDns_LookupCNAME() {
 	cname, err := network.DefaultResolver.LookupCNAME("go-hacker-code.lab.secself.com")
 	if err != nil {
-		fmt.Println(err)
+		log.Fatal(err)
 	}
 
 	fmt.Println(cname)
