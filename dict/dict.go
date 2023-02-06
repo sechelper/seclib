@@ -3,7 +3,6 @@ package dict
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"io"
 	"os"
 )
@@ -19,22 +18,27 @@ type Line interface {
 type Dict struct {
 	Lines chan Line // dict line channel
 	Done  chan struct{}
+	Err   chan error
 
 	MakeLine func(string) (Line, error) // make dict Line
 }
 
-// DefaultDict default dict
+// NewDefaultDict default dict
 // line chan size 1000 , annotation use '#', MakeLine use MakeDefaultStrLine
-var DefaultDict = &Dict{
-	Lines:    make(chan Line, 10),
-	Done:     make(chan struct{}, 1),
-	MakeLine: MakeDefaultStrLine,
+func NewDefaultDict() *Dict {
+	return &Dict{
+		Lines:    make(chan Line, 10),
+		Done:     make(chan struct{}, 1),
+		Err:      make(chan error, 1),
+		MakeLine: MakeDefaultStrLine,
+	}
 }
 
 func NewDict(size int, makeLine func(string) (Line, error)) *Dict {
 	return &Dict{
 		Lines:    make(chan Line, size),
 		Done:     make(chan struct{}, 1),
+		Err:      make(chan error, 1),
 		MakeLine: makeLine,
 	}
 }
@@ -56,9 +60,9 @@ func (dict *Dict) LoadText(path string) (err error) {
 		if line, err := dict.MakeLine(scanner.Text()); err == nil {
 			dict.Lines <- line
 		} else {
-			fmt.Println(err)
+			dict.Err <- err
+			return err
 		}
-
 	}
 
 	return nil
@@ -94,4 +98,5 @@ func Counter(path string) (int, error) {
 func (dict *Dict) Close() {
 	dict.Done <- struct{}{}
 	close(dict.Lines)
+	close(dict.Err)
 }
