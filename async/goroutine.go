@@ -16,8 +16,8 @@ func Goroutine(n int, input func(*chan any), process func(...any)) {
 			defer wg.Done()
 			for {
 				select {
-				case args := <-c:
-					if args == nil {
+				case args, ok := <-c:
+					if !ok {
 						return
 					}
 					process(args)
@@ -32,5 +32,5 @@ func Goroutine(n int, input func(*chan any), process func(...any)) {
 
 	input(&c)
 	close(c)
-	wg.Wait()
+	wg.Wait() // wait all goroutine done
 }
