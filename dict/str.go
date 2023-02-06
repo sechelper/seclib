@@ -1,15 +1,22 @@
 package dict
 
-type StrLine struct {
-	Line
+type StrLine string
 
-	Str string
+func (sl *StrLine) GetSep() string {
+	//TODO implement me
+	panic("implement me")
 }
 
-func (sl StrLine) String() string {
-	return sl.Str
+func (sl *StrLine) SetSep(s string) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (sl *StrLine) String() string {
+	return string(*sl)
 }
 
 func MakeDefaultStrLine(str string) (Line, error) {
-	return StrLine{Str: str}, nil
+	line := StrLine(str)
+	return &line, nil
 }

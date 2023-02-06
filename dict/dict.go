@@ -18,7 +18,6 @@ type Line interface {
 type Dict struct {
 	Lines chan Line // dict line channel
 	Done  chan struct{}
-	Err   chan error
 
 	MakeLine func(string) (Line, error) // make dict Line
 }
@@ -29,7 +28,6 @@ func NewDefaultDict() *Dict {
 	return &Dict{
 		Lines:    make(chan Line, 10),
 		Done:     make(chan struct{}, 1),
-		Err:      make(chan error, 1),
 		MakeLine: MakeDefaultStrLine,
 	}
 }
@@ -38,7 +36,6 @@ func NewDict(size int, makeLine func(string) (Line, error)) *Dict {
 	return &Dict{
 		Lines:    make(chan Line, size),
 		Done:     make(chan struct{}, 1),
-		Err:      make(chan error, 1),
 		MakeLine: makeLine,
 	}
 }
@@ -60,12 +57,16 @@ func (dict *Dict) LoadText(path string) (err error) {
 		if line, err := dict.MakeLine(scanner.Text()); err == nil {
 			dict.Lines <- line
 		} else {
-			dict.Err <- err
 			return err
 		}
 	}
 
 	return nil
+}
+
+func (dict *Dict) Close() {
+	dict.Done <- struct{}{}
+	close(dict.Lines)
 }
 
 // Counter file line count
@@ -92,11 +93,4 @@ func Counter(path string) (int, error) {
 			return count, err
 		}
 	}
-
-}
-
-func (dict *Dict) Close() {
-	dict.Done <- struct{}{}
-	close(dict.Lines)
-	close(dict.Err)
 }
