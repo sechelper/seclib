@@ -62,3 +62,16 @@ func ExampleDns_LookupCNAME() {
 
 	fmt.Println(cname)
 }
+
+func ExampleRandomUserAgent() {
+	for i := 0; i < 10; i++ {
+		fmt.Println(network.RandomUserAgent())
+	}
+}
+
+func ExampleIsDomainName() {
+	fmt.Println(network.IsDomainName("secself.com"))        // true
+	fmt.Println(network.IsDomainName("www.secself"))        // true
+	fmt.Println(network.IsDomainName("secself.com/"))       // false
+	fmt.Println(network.IsDomainName("http://secself.com")) // false
+}
