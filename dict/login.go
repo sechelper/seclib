@@ -1,37 +1,24 @@
 package dict
 
 import (
+	"bytes"
 	"fmt"
-	"strings"
 )
 
-type Login struct {
+// LoginLine user login use this Line
+type LoginLine struct {
 	Line
-
-	sep string
 
 	User   string
 	Passwd string
 }
 
-func (login *Login) String() string {
-	return fmt.Sprintf("%s:%s", login.User, login.Passwd)
-}
-
-func (login *Login) GetSep() string {
-	return login.sep
-}
-
-func (login *Login) SetSep(sep string) {
-	login.sep = sep
-}
-
-// MakeDefaultLogin make Login dict line
-func MakeDefaultLogin(str string) (Line, error) {
-	sep := ":"
-	line := strings.Split(str, sep)
-	if len(line) != 2 {
-		return nil, fmt.Errorf("split line error")
+// LoginLineFunc make LoginLine
+func LoginLineFunc(b []byte) (Line, error) {
+	// TODO fix bug, like use:r:pass, return user is "use", the user should be "use:r"
+	if i := bytes.IndexByte(b, ':'); i >= 0 {
+		// We have a full newline-terminated line.
+		return LoginLine{User: string(b[:i]), Passwd: string(b[i+1:])}, nil
 	}
-	return &Login{sep: sep, User: line[0], Passwd: line[1]}, nil
+	return nil, fmt.Errorf("%s error not found ':' ", b)
 }

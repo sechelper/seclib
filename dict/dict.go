@@ -1,96 +1,456 @@
+// Copyright 2013 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package dict
 
 import (
-	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"os"
+	"unicode/utf8"
 )
+
+const maxConsecutiveEmptyReads = 100
 
 // Line dict line data
 type Line interface {
-	String() string
-	GetSep() string
-	SetSep(string)
 }
 
-// Dict data dictionary
+// Dict provides a convenient interface for reading data such as
+// a file of newline-delimited lines of text. Successive calls to
+// the Scan method will step through the 'tokens' of a file, skipping
+// the bytes between the tokens. The specification of a token is
+// defined by a split function of type SplitFunc; the default split
+// function breaks the input into lines with line termination stripped. Split
+// functions are defined in this package for scanning a file into
+// lines, bytes, UTF-8-encoded runes, and space-delimited words. The
+// client may instead provide a custom split function.
+//
+// Scanning stops unrecoverably at EOF, the first I/O error, or a token too
+// large to fit in the buffer. When a scan stops, the reader may have
+// advanced arbitrarily far past the last token. Programs that need more
+// control over error handling or large tokens, or must run sequential scans
+// on a reader, should use bufio.Reader instead.
 type Dict struct {
-	Lines chan Line // dict line channel
-	Done  chan struct{}
-
-	MakeLine func(string) (Line, error) // make dict Line
+	r            io.Reader // The reader provided by the client.
+	split        SplitFunc // The function to split the tokens.
+	line         LineFunc  // The function to Line the tokens.
+	maxTokenSize int       // Maximum size of a token; modified by tests.
+	token        []byte    // Last token returned by split.
+	buf          []byte    // Buffer used as argument to split.
+	start        int       // First non-processed byte in buf.
+	end          int       // End of data in buf.
+	err          error     // Sticky error.
+	empties      int       // Count of successive empty tokens.
+	scanCalled   bool      // Scan has been called; buffer is in use.
+	done         bool      // Scan has finished.
 }
 
-// NewDefaultDict default dict
-// line chan size 1000 , annotation use '#', MakeLine use MakeDefaultStrLine
-func NewDefaultDict() *Dict {
+// SplitFunc is the signature of the split function used to tokenize the
+// input. The arguments are an initial substring of the remaining unprocessed
+// data and a flag, atEOF, that reports whether the Reader has no more data
+// to give. The return values are the number of bytes to advance the input
+// and the next token to return to the user, if any, plus an error, if any.
+//
+// Scanning stops if the function returns an error, in which case some of
+// the input may be discarded. If that error is ErrFinalToken, scanning
+// stops with no error.
+//
+// Otherwise, the Dict advances the input. If the token is not nil,
+// the Dict returns it to the user. If the token is nil, the
+// Dict reads more data and continues scanning; if there is no more
+// data--if atEOF was true--the Dict returns. If the data does not
+// yet hold a complete token, for instance if it has no newline while
+// scanning lines, a SplitFunc can return (0, nil, nil) to signal the
+// Dict to read more data into the slice and try again with a
+// longer slice starting at the same point in the input.
+//
+// The function is never called with an empty data slice unless atEOF
+// is true. If atEOF is true, however, data may be non-empty and,
+// as always, holds unprocessed text.
+type SplitFunc func(data []byte, atEOF bool) (advance int, token []byte, err error)
+
+type LineFunc func([]byte) (Line, error)
+
+// Errors returned by Dict.
+var (
+	ErrTooLong         = errors.New("bufio.Dict: token too long")
+	ErrNegativeAdvance = errors.New("bufio.Dict: SplitFunc returns negative advance count")
+	ErrAdvanceTooFar   = errors.New("bufio.Dict: SplitFunc returns advance count beyond input")
+	ErrBadReadCount    = errors.New("bufio.Dict: Read returned impossible count")
+)
+
+const (
+	// MaxScanTokenSize is the maximum size used to buffer a token
+	// unless the user provides an explicit buffer with Dict.Buffer.
+	// The actual maximum token size may be smaller as the buffer
+	// may need to include, for instance, a newline.
+	MaxScanTokenSize = 64 * 1024
+
+	startBufSize = 4096 // Size of initial allocation for buffer.
+)
+
+// NewDict returns a new Dict to read from r.
+// The split function defaults to DefaultLines.
+func NewDict(r io.Reader) *Dict {
+
 	return &Dict{
-		Lines:    make(chan Line, 10),
-		Done:     make(chan struct{}, 1),
-		MakeLine: MakeDefaultStrLine,
+		r:            r,
+		split:        DefaultLines,
+		line:         DefaultLine,
+		maxTokenSize: MaxScanTokenSize,
 	}
 }
 
-func NewDict(size int, makeLine func(string) (Line, error)) *Dict {
-	return &Dict{
-		Lines:    make(chan Line, size),
-		Done:     make(chan struct{}, 1),
-		MakeLine: makeLine,
-	}
-}
-
-// LoadText load text dict from file
-func (dict *Dict) LoadText(path string) (err error) {
-	file, err := os.Open(path)
+func NewDictForFile(path string) (*Dict, error) {
+	o, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-
-	for scanner.Scan() {
-		if line, err := dict.MakeLine(scanner.Text()); err == nil {
-			dict.Lines <- line
-		} else {
-			return err
-		}
-	}
-
-	return nil
+	return NewDict(o), nil
 }
 
-func (dict *Dict) Close() {
-	dict.Done <- struct{}{}
-	close(dict.Lines)
+// Err returns the first non-EOF error that was encountered by the Dict.
+func (d *Dict) Err() error {
+	if d.err == io.EOF {
+		return nil
+	}
+	return d.err
 }
 
-// Counter file line count
-func Counter(path string) (int, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-	r := bufio.NewReader(file)
-	buf := make([]byte, 32*1024)
-	count := 0
-	lineSep := []byte{'\n'}
+// Bytes returns the most recent token generated by a call to Scan.
+// The underlying array may point to data that will be overwritten
+// by a subsequent call to Scan. It does no allocation.
+func (d *Dict) Bytes() []byte {
+	return d.token
+}
 
+// Text returns the most recent token generated by a call to Scan
+// as a newly allocated string holding its bytes.
+func (d *Dict) Text() string {
+	return string(d.token)
+}
+
+// Line returns the most recent token generated by a call to Scan
+// as a newly allocated string holding its bytes.
+func (d *Dict) Line() (Line, error) {
+	return d.line(d.token)
+}
+
+// ErrFinalToken is a special sentinel error value. It is intended to be
+// returned by a Split function to indicate that the token being delivered
+// with the error is the last token and scanning should stop after this one.
+// After ErrFinalToken is received by Scan, scanning stops with no error.
+// The value is useful to stop processing early or when it is necessary to
+// deliver a final empty token. One could achieve the same behavior
+// with a custom error value but providing one here is tidier.
+// See the emptyFinalToken example for a use of this value.
+var ErrFinalToken = errors.New("final token")
+
+// Scan advances the Dict to the next token, which will then be
+// available through the Bytes or Text method. It returns false when the
+// scan stops, either by reaching the end of the input or an error.
+// After Scan returns false, the Err method will return any error that
+// occurred during scanning, except that if it was io.EOF, Err
+// will return nil.
+// Scan panics if the split function returns too many empty
+// tokens without advancing the input. This is a common error mode for
+// scanners.
+func (d *Dict) Scan() bool {
+	if d.done {
+		return false
+	}
+	d.scanCalled = true
+	// Loop until we have a token.
 	for {
-		c, err := r.Read(buf)
-		count += bytes.Count(buf[:c], lineSep)
-
-		switch {
-		case err == io.EOF:
-			return count, nil
-
-		case err != nil:
-			return count, err
+		// See if we can get a token with what we already have.
+		// If we've run out of data but have an error, give the split function
+		// a chance to recover any remaining, possibly empty token.
+		if d.end > d.start || d.err != nil {
+			advance, token, err := d.split(d.buf[d.start:d.end], d.err != nil)
+			if err != nil {
+				if err == ErrFinalToken {
+					d.token = token
+					d.done = true
+					return true
+				}
+				d.setErr(err)
+				return false
+			}
+			if !d.advance(advance) {
+				return false
+			}
+			d.token = token
+			if token != nil {
+				if d.err == nil || advance > 0 {
+					d.empties = 0
+				} else {
+					// Returning tokens not advancing input at EOF.
+					d.empties++
+					if d.empties > maxConsecutiveEmptyReads {
+						panic("bufio.Scan: too many empty tokens without progressing")
+					}
+				}
+				return true
+			}
+		}
+		// We cannot generate a token with what we are holding.
+		// If we've already hit EOF or an I/O error, we are done.
+		if d.err != nil {
+			// Shut it down.
+			d.start = 0
+			d.end = 0
+			return false
+		}
+		// Must read more data.
+		// First, shift data to beginning of buffer if there'd lots of empty space
+		// or space is needed.
+		if d.start > 0 && (d.end == len(d.buf) || d.start > len(d.buf)/2) {
+			copy(d.buf, d.buf[d.start:d.end])
+			d.end -= d.start
+			d.start = 0
+		}
+		// Is the buffer full? If so, resize.
+		if d.end == len(d.buf) {
+			// Guarantee no overflow in the multiplication below.
+			const maxInt = int(^uint(0) >> 1)
+			if len(d.buf) >= d.maxTokenSize || len(d.buf) > maxInt/2 {
+				d.setErr(ErrTooLong)
+				return false
+			}
+			newSize := len(d.buf) * 2
+			if newSize == 0 {
+				newSize = startBufSize
+			}
+			if newSize > d.maxTokenSize {
+				newSize = d.maxTokenSize
+			}
+			newBuf := make([]byte, newSize)
+			copy(newBuf, d.buf[d.start:d.end])
+			d.buf = newBuf
+			d.end -= d.start
+			d.start = 0
+		}
+		// Finally we can read some input. Make sure we don't get stuck with
+		// a misbehaving Reader. Officially we don't need to do this, but let'd
+		// be extra careful: Dict is for safe, simple jobs.
+		for loop := 0; ; {
+			n, err := d.r.Read(d.buf[d.end:len(d.buf)])
+			if n < 0 || len(d.buf)-d.end < n {
+				d.setErr(ErrBadReadCount)
+				break
+			}
+			d.end += n
+			if err != nil {
+				d.setErr(err)
+				break
+			}
+			if n > 0 {
+				d.empties = 0
+				break
+			}
+			loop++
+			if loop > maxConsecutiveEmptyReads {
+				d.setErr(io.ErrNoProgress)
+				break
+			}
 		}
 	}
+}
+
+// advance consumes n bytes of the buffer. It reports whether the advance was legal.
+func (d *Dict) advance(n int) bool {
+	if n < 0 {
+		d.setErr(ErrNegativeAdvance)
+		return false
+	}
+	if n > d.end-d.start {
+		d.setErr(ErrAdvanceTooFar)
+		return false
+	}
+	d.start += n
+	return true
+}
+
+// setErr records the first error encountered.
+func (d *Dict) setErr(err error) {
+	if d.err == nil || d.err == io.EOF {
+		d.err = err
+	}
+}
+
+// Buffer sets the initial buffer to use when scanning and the maximum
+// size of buffer that may be allocated during scanning. The maximum
+// token size is the larger of max and cap(buf). If max <= cap(buf),
+// Scan will use this buffer only and do no allocation.
+//
+// By default, Scan uses an internal buffer and sets the
+// maximum token size to MaxScanTokenSize.
+//
+// Buffer panics if it is called after scanning has started.
+func (d *Dict) Buffer(buf []byte, max int) {
+	if d.scanCalled {
+		panic("Buffer called after Scan")
+	}
+	d.buf = buf[0:cap(buf)]
+	d.maxTokenSize = max
+}
+
+// Split sets the split function for the Dict.
+// The default split function is DefaultLines.
+//
+// Split panics if it is called after scanning has started.
+func (d *Dict) Split(split SplitFunc) {
+	if d.scanCalled {
+		panic("Split called after Scan")
+	}
+	d.split = split
+}
+
+func (d *Dict) LineFunc(line LineFunc) {
+	if d.scanCalled {
+		panic("LineFunc called after Scan")
+	}
+	d.line = line
+}
+
+// Split functions
+
+// ScanBytes is a split function for a Dict that returns each byte as a token.
+func ScanBytes(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	return 1, data[0:1], nil
+}
+
+var errorRune = []byte(string(utf8.RuneError))
+
+// ScanRunes is a split function for a Dict that returns each
+// UTF-8-encoded rune as a token. The sequence of runes returned is
+// equivalent to that from a range loop over the input as a string, which
+// means that erroneous UTF-8 encodings translate to U+FFFD = "\xef\xbf\xbd".
+// Because of the Scan interface, this makes it impossible for the client to
+// distinguish correctly encoded replacement runes from encoding errors.
+func ScanRunes(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+
+	// Fast path 1: ASCII.
+	if data[0] < utf8.RuneSelf {
+		return 1, data[0:1], nil
+	}
+
+	// Fast path 2: Correct UTF-8 decode without error.
+	_, width := utf8.DecodeRune(data)
+	if width > 1 {
+		// It'd a valid encoding. Width cannot be one for a correctly encoded
+		// non-ASCII rune.
+		return width, data[0:width], nil
+	}
+
+	// We know it'd an error: we have width==1 and implicitly r==utf8.RuneError.
+	// Is the error because there wasn't a full rune to be decoded?
+	// FullRune distinguishes correctly between erroneous and incomplete encodings.
+	if !atEOF && !utf8.FullRune(data) {
+		// Incomplete; get more bytes.
+		return 0, nil, nil
+	}
+
+	// We have a real UTF-8 encoding error. Return a properly encoded error rune
+	// but advance only one byte. This matches the behavior of a range loop over
+	// an incorrectly encoded string.
+	return 1, errorRune, nil
+}
+
+// dropCR drops a terminal \r from the data.
+func dropCR(data []byte) []byte {
+	if len(data) > 0 && data[len(data)-1] == '\r' {
+		return data[0 : len(data)-1]
+	}
+	return data
+}
+
+// DefaultLines is a split function for a Dict that returns each line of
+// text, stripped of any trailing end-of-line marker. The returned line may
+// be empty. The end-of-line marker is one optional carriage return followed
+// by one mandatory newline. In regular expression notation, it is `\r?\n`.
+// The last non-empty line of input will be returned even if it has no
+// newline.
+func DefaultLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		// We have a full newline-terminated line.
+		return i + 1, dropCR(data[0:i]), nil
+	}
+	// If we're at EOF, we have a final, non-terminated line. Return it.
+	if atEOF {
+		return len(data), dropCR(data), nil
+	}
+	// Request more data.
+	return 0, nil, nil
+}
+
+func DefaultLine(data []byte) (Line, error) {
+	return Line(string(data)), nil
+}
+
+// isSpace reports whether the character is a Unicode white space character.
+// We avoid dependency on the unicode package, but check validity of the implementation
+// in the tests.
+func isSpace(r rune) bool {
+	if r <= '\u00FF' {
+		// Obvious ASCII ones: \t through \r plus space. Plus two Latin-1 oddballs.
+		switch r {
+		case ' ', '\t', '\n', '\v', '\f', '\r':
+			return true
+		case '\u0085', '\u00A0':
+			return true
+		}
+		return false
+	}
+	// High-valued ones.
+	if '\u2000' <= r && r <= '\u200a' {
+		return true
+	}
+	switch r {
+	case '\u1680', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000':
+		return true
+	}
+	return false
+}
+
+// ScanWords is a split function for a Dict that returns each
+// space-separated word of text, with surrounding spaces deleted. It will
+// never return an empty string. The definition of space is set by
+// unicode.IsSpace.
+func ScanWords(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	// Skip leading spaces.
+	start := 0
+	for width := 0; start < len(data); start += width {
+		var r rune
+		r, width = utf8.DecodeRune(data[start:])
+		if !isSpace(r) {
+			break
+		}
+	}
+	// Scan until space, marking end of word.
+	for width, i := 0, start; i < len(data); i += width {
+		var r rune
+		r, width = utf8.DecodeRune(data[i:])
+		if isSpace(r) {
+			return i + width, data[start:i], nil
+		}
+	}
+	// If we're at EOF, we have a final, non-empty, non-terminated word. Return it.
+	if atEOF && len(data) > start {
+		return len(data), data[start:], nil
+	}
+	// Request more data.
+	return start, nil, nil
 }
