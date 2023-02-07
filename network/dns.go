@@ -25,7 +25,7 @@ func NewDefaultMsg() *Msg {
 
 var DefaultResolver = &Dns{
 	NewMsg:  NewDefaultMsg,
-	Ns:      "223.6.6.6:53",
+	Ns:      "223.6.6.6:53", // aliyun public ns
 	Timeout: 3 * time.Second,
 }
 
