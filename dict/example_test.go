@@ -15,8 +15,9 @@ func ExampleNewDict() {
 	d := dict.NewDict(op)
 
 	for d.Scan() {
-		line, _ := d.Line()
-		fmt.Println(line)
+		if line, err := d.Line(); err == nil {
+			fmt.Println(line)
+		}
 	}
 }
 
@@ -27,8 +28,9 @@ func ExampleNewDictForFile() {
 	}
 
 	for d.Scan() {
-		line, _ := d.Line()
-		fmt.Println(line)
+		if line, err := d.Line(); err == nil {
+			fmt.Println(line)
+		}
 	}
 }
 
@@ -39,11 +41,9 @@ func ExampleLoginLineFunc() {
 	}
 	d.LineFunc(dict.LoginLineFunc)
 	for d.Scan() {
-		line, err := d.Line()
-		if err != nil {
-			log.Println(err)
-			continue
+		if line, err := d.Line(); err == nil {
+			fmt.Println(line.(dict.LoginLine).User, line.(dict.LoginLine).Passwd)
 		}
-		fmt.Println(line.(dict.LoginLine).User, line.(dict.LoginLine).Passwd)
+
 	}
 }
