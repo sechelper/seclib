@@ -1,9 +1,18 @@
 package network
 
 import (
+	"bytes"
 	"crypto/tls"
+	"fmt"
+	"io"
 	"math/rand"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -99,4 +108,101 @@ func IsDomainName(s string) bool {
 	}
 
 	return nonNumeric
+}
+
+type HttpClient struct {
+	http.Client
+
+	header http.Header
+}
+
+func (c *HttpClient) PreDo(method string, url string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.header != nil {
+		req.Header = c.header
+	}
+
+	resp, err := c.Do(req)
+
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func (c *HttpClient) Get(url string) (*http.Response, error) {
+	return c.PreDo("GET", url, nil)
+}
+
+func (c *HttpClient) Post(url, contentType string, body io.Reader) (resp *http.Response, err error) {
+	c.Headers("Content-Type", contentType)
+	return c.PreDo("POST", url, body)
+}
+
+func (c *HttpClient) PostForm(url string, data url.Values) (resp *http.Response, err error) {
+	c.Headers("Content-Type", "application/x-www-form-urlencoded")
+	return c.PreDo("Post", url, strings.NewReader(data.Encode()))
+}
+
+var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
+
+func escapeQuotes(s string) string {
+	return quoteEscaper.Replace(s)
+}
+
+type UPFile struct {
+	Path        string
+	Field       string
+	Filename    string
+	ContentType string
+}
+
+const DefaultFileContentType = "application/octet-stream"
+
+// UploadFile ref https://gist.github.com/andrewmilson/19185aab2347f6ad29f5
+func (c *HttpClient) UploadFile(url string, files []UPFile) (resp *http.Response, err error) {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	for i := range files {
+		op, err := os.Open(files[i].Path)
+		if err != nil {
+			return nil, err
+		}
+
+		filename := files[i].Filename
+		if filename == "" {
+			filename = filepath.Base(op.Name())
+		}
+
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Disposition",
+			fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
+				escapeQuotes(files[i].Field), escapeQuotes(filename)))
+		if files[i].ContentType == "" {
+			h.Set("Content-Type", DefaultFileContentType)
+		} else {
+			h.Set("Content-Type", files[i].ContentType)
+		}
+
+		part, _ := writer.CreatePart(h)
+
+		io.Copy(part, op)
+	}
+
+	c.Headers("Content-Type", writer.FormDataContentType())
+
+	writer.Close()
+
+	return c.PreDo("POST", url, body)
+}
+
+func (c *HttpClient) Headers(k string, v string) {
+	if c.header == nil {
+		c.header = make(http.Header, 0)
+	}
+	c.header.Set(k, v)
 }
